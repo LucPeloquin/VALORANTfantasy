@@ -30,6 +30,8 @@ function db(): PDO
         seedCoreRows($pdo);
     }
 
+    ensureSchemaMigrations($pdo);
+
     return $pdo;
 }
 
@@ -66,4 +68,34 @@ function seedCoreRows(PDO $pdo): void
         ':max_from_team' => 2,
         ':created_at' => $now,
     ]);
+}
+
+function ensureSchemaMigrations(PDO $pdo): void
+{
+    $playerColumns = tableColumns($pdo, 'players');
+    if ($playerColumns && !isset($playerColumns['avatar_url'])) {
+        $pdo->exec('ALTER TABLE players ADD COLUMN avatar_url TEXT');
+    }
+}
+
+function tableColumns(PDO $pdo, string $table): array
+{
+    if (!preg_match('/^[a-z_][a-z0-9_]*$/i', $table)) {
+        throw new InvalidArgumentException('Invalid table name for PRAGMA lookup.');
+    }
+
+    $result = $pdo->query('PRAGMA table_info(' . $table . ')');
+    if (!$result) {
+        return [];
+    }
+
+    $columns = [];
+    foreach ($result->fetchAll() as $row) {
+        $name = (string)($row['name'] ?? '');
+        if ($name !== '') {
+            $columns[$name] = true;
+        }
+    }
+
+    return $columns;
 }

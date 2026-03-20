@@ -86,7 +86,7 @@ function runScheduledSyncIfDue(int $eventId, bool $force = false): array
 function listPlayersForEvent(int $eventId): array
 {
     $sql = <<<'SQL'
-SELECT p.*, t.name AS team_name, t.short_name,
+SELECT p.*, t.name AS team_name, t.short_name, t.slug AS team_slug, t.source_team_id,
        s.rounds_played, s.rating, s.acs, s.kd, s.kast, s.adr, s.kpr, s.apr, s.fkpr, s.fdpr, s.hs_pct, s.cl_pct,
        s.source_primary, s.source_secondary, s.updated_at AS stats_updated_at
 FROM players p
@@ -99,6 +99,149 @@ SQL;
     $stmt = db()->prepare($sql);
     $stmt->execute([':event_id' => $eventId]);
     return $stmt->fetchAll();
+}
+
+function listPlayersForAdmin(int $eventId): array
+{
+    $sql = <<<'SQL'
+SELECT p.*, t.name AS team_name, t.short_name, t.slug AS team_slug, t.source_team_id,
+       s.rounds_played, s.rating, s.acs, s.kd, s.kast, s.adr, s.kpr, s.apr, s.fkpr, s.fdpr, s.hs_pct, s.cl_pct,
+       s.source_primary, s.source_secondary, s.updated_at AS stats_updated_at
+FROM players p
+INNER JOIN pro_teams t ON t.id = p.team_id
+LEFT JOIN player_event_stats s ON s.player_id = p.id AND s.event_id = p.event_id
+WHERE p.event_id = :event_id
+ORDER BY p.is_active DESC, p.price DESC, p.alias ASC
+SQL;
+
+    $stmt = db()->prepare($sql);
+    $stmt->execute([':event_id' => $eventId]);
+    return $stmt->fetchAll();
+}
+
+function adminUpdatePlayerValues(int $eventId, int $playerId, array $payload): void
+{
+    $pdo = db();
+
+    $lookup = $pdo->prepare(
+        'SELECT p.id, s.id AS stats_id
+         FROM players p
+         LEFT JOIN player_event_stats s ON s.player_id = p.id AND s.event_id = p.event_id
+         WHERE p.id = :player_id AND p.event_id = :event_id
+         LIMIT 1'
+    );
+    $lookup->execute([
+        ':player_id' => $playerId,
+        ':event_id' => $eventId,
+    ]);
+    $row = $lookup->fetch();
+    if (!$row) {
+        throw new RuntimeException('Player not found for this event.');
+    }
+
+    $alias = trim((string)($payload['alias'] ?? ''));
+    if ($alias === '') {
+        throw new InvalidArgumentException('Alias is required.');
+    }
+
+    $realName = trim((string)($payload['real_name'] ?? ''));
+    $avatarUrl = trim((string)($payload['avatar_url'] ?? ''));
+    $price = (int)($payload['price'] ?? 0);
+    $isActive = !empty($payload['is_active']) ? 1 : 0;
+
+    $stats = [
+        'rating' => $payload['rating'] ?? null,
+        'acs' => $payload['acs'] ?? null,
+        'kd' => $payload['kd'] ?? null,
+        'kast' => $payload['kast'] ?? null,
+        'kpr' => $payload['kpr'] ?? null,
+        'apr' => $payload['apr'] ?? null,
+        'fkpr' => $payload['fkpr'] ?? null,
+        'fdpr' => $payload['fdpr'] ?? null,
+        'cl_pct' => $payload['cl_pct'] ?? null,
+    ];
+
+    $pdo->beginTransaction();
+    try {
+        $updatePlayer = $pdo->prepare(
+            'UPDATE players
+             SET alias = :alias,
+                 real_name = :real_name,
+                 avatar_url = :avatar_url,
+                 price = :price,
+                 is_active = :is_active
+             WHERE id = :player_id AND event_id = :event_id'
+        );
+        $updatePlayer->execute([
+            ':alias' => $alias,
+            ':real_name' => $realName !== '' ? $realName : null,
+            ':avatar_url' => $avatarUrl !== '' ? $avatarUrl : null,
+            ':price' => $price,
+            ':is_active' => $isActive,
+            ':player_id' => $playerId,
+            ':event_id' => $eventId,
+        ]);
+
+        if (!empty($row['stats_id'])) {
+            $updateStats = $pdo->prepare(
+                'UPDATE player_event_stats
+                 SET rating = :rating,
+                     acs = :acs,
+                     kd = :kd,
+                     kast = :kast,
+                     kpr = :kpr,
+                     apr = :apr,
+                     fkpr = :fkpr,
+                     fdpr = :fdpr,
+                     cl_pct = :cl_pct,
+                     updated_at = :updated_at
+                 WHERE id = :stats_id'
+            );
+            $updateStats->execute([
+                ':rating' => $stats['rating'],
+                ':acs' => $stats['acs'],
+                ':kd' => $stats['kd'],
+                ':kast' => $stats['kast'],
+                ':kpr' => $stats['kpr'],
+                ':apr' => $stats['apr'],
+                ':fkpr' => $stats['fkpr'],
+                ':fdpr' => $stats['fdpr'],
+                ':cl_pct' => $stats['cl_pct'],
+                ':updated_at' => nowUtc(),
+                ':stats_id' => (int)$row['stats_id'],
+            ]);
+        } else {
+            $insertStats = $pdo->prepare(
+                'INSERT INTO player_event_stats
+                (event_id, player_id, rating, acs, kd, kast, kpr, apr, fkpr, fdpr, cl_pct, source_primary, source_secondary, updated_at)
+                 VALUES
+                (:event_id, :player_id, :rating, :acs, :kd, :kast, :kpr, :apr, :fkpr, :fdpr, :cl_pct, :source_primary, :source_secondary, :updated_at)'
+            );
+            $insertStats->execute([
+                ':event_id' => $eventId,
+                ':player_id' => $playerId,
+                ':rating' => $stats['rating'],
+                ':acs' => $stats['acs'],
+                ':kd' => $stats['kd'],
+                ':kast' => $stats['kast'],
+                ':kpr' => $stats['kpr'],
+                ':apr' => $stats['apr'],
+                ':fkpr' => $stats['fkpr'],
+                ':fdpr' => $stats['fdpr'],
+                ':cl_pct' => $stats['cl_pct'],
+                ':source_primary' => 'manual',
+                ':source_secondary' => 'admin',
+                ':updated_at' => nowUtc(),
+            ]);
+        }
+
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
 }
 
 function getPlayerProfile(int $playerId, int $eventId): ?array
@@ -142,6 +285,73 @@ SQL;
     $stmt = db()->prepare($sql);
     $stmt->execute([':user_id' => $userId]);
     return $stmt->fetchAll();
+}
+
+function getPrimaryLeagueForEvent(int $eventId): ?array
+{
+    $sql = <<<'SQL'
+SELECT l.*, e.name AS event_name, e.lock_at, e.budget, e.max_from_team, e.id AS event_id
+FROM fantasy_leagues l
+INNER JOIN events e ON e.id = l.event_id
+WHERE l.event_id = :event_id
+ORDER BY l.created_at ASC, l.id ASC
+LIMIT 1
+SQL;
+
+    $stmt = db()->prepare($sql);
+    $stmt->execute([':event_id' => $eventId]);
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+function defaultLeagueOwnerUserId(): int
+{
+    $admin = db()->query('SELECT id FROM users WHERE is_admin = 1 ORDER BY id ASC LIMIT 1')->fetchColumn();
+    if ($admin) {
+        return (int)$admin;
+    }
+
+    $firstUser = db()->query('SELECT id FROM users ORDER BY id ASC LIMIT 1')->fetchColumn();
+    if ($firstUser) {
+        return (int)$firstUser;
+    }
+
+    throw new RuntimeException('No user exists to own the primary league.');
+}
+
+function ensurePrimaryLeagueForEvent(int $eventId, ?int $ownerUserId = null): array
+{
+    $existing = getPrimaryLeagueForEvent($eventId);
+    if ($existing) {
+        return $existing;
+    }
+
+    $eventStmt = db()->prepare('SELECT name FROM events WHERE id = :id');
+    $eventStmt->execute([':id' => $eventId]);
+    $eventName = (string)($eventStmt->fetchColumn() ?: 'VCT Fantasy');
+
+    $leagueId = createLeague(
+        $eventId,
+        $ownerUserId ?? defaultLeagueOwnerUserId(),
+        $eventName . ' Main League',
+        'Single shared league for this event.',
+        true
+    );
+
+    $league = getLeague($leagueId);
+    if (!$league) {
+        throw new RuntimeException('Failed to load primary league after creation.');
+    }
+
+    return $league;
+}
+
+function ensureUserInPrimaryLeague(int $userId, int $eventId): array
+{
+    $league = ensurePrimaryLeagueForEvent($eventId, $userId);
+    addLeagueMember((int)$league['id'], $userId);
+    ensureFantasyTeam((int)$league['id'], $userId);
+    return $league;
 }
 
 function createLeague(int $eventId, int $ownerUserId, string $name, string $description, bool $isPublic): int

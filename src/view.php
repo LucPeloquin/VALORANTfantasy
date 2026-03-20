@@ -55,27 +55,38 @@ function renderLayout(string $title, callable $body, ?array $user = null, array 
                     <a href="/rules.php">Rules & Pricing</a>
                     <?php if ($user): ?>
                         <a href="/dashboard.php">Dashboard</a>
-                        <?php if ((int)$user['is_admin'] === 1): ?>
-                            <a href="/admin.php">Admin</a>
-                        <?php endif; ?>
-                        <form method="post" action="/logout.php" class="inline-form">
-                            <input type="hidden" name="csrf_token" value="<?= h(csrfToken()) ?>">
-                            <button class="linklike" type="submit">Logout</button>
-                        </form>
                     <?php else: ?>
                         <a href="/login.php">Sign in</a>
                         <a href="/register.php">Register</a>
                     <?php endif; ?>
                 </nav>
+                <?php if ($user): ?>
+                    <details class="nav-hamburger">
+                        <summary>
+                            <span class="nav-hamburger-icon" aria-hidden="true">☰</span>
+                            <span>Menu</span>
+                        </summary>
+                        <div class="nav-hamburger-panel">
+                            <a href="/dashboard.php">Dashboard</a>
+                            <?php if ((int)$user['is_admin'] === 1): ?>
+                                <a href="/admin.php">Admin</a>
+                            <?php endif; ?>
+                            <a href="/credits.php">Credits</a>
+                            <a href="/logout-page.php">Logout</a>
+                        </div>
+                    </details>
+                <?php endif; ?>
             </div>
         </header>
 
-        <main class="wrap page">
-            <?php foreach ($flashes as $flash): ?>
-                <div class="flash <?= h($flash['type']) ?>"><?= h($flash['message']) ?></div>
-            <?php endforeach; ?>
-            <?php $body(); ?>
-        </main>
+        <div class="wrap app-shell">
+            <main class="page">
+                <?php foreach ($flashes as $flash): ?>
+                    <div class="flash <?= h($flash['type']) ?>"><?= h($flash['message']) ?></div>
+                <?php endforeach; ?>
+                <?php $body(); ?>
+            </main>
+        </div>
     </body>
     </html>
     <?php

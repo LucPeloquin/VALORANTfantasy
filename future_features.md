@@ -6,6 +6,7 @@
 - After we confirm it in production, delete it from `Completed`.
 
 ## Backlog
+- [ ] Re-enable multi-league create/join flows (currently shelved in single-league mode)
 - [ ] Admin sync status page with failure alerts/retry
 - [ ] Region expansion framework (support multiple events/regions in one season)
 - [ ] Region selector UX for future rollout (Americas, EMEA, Pacific, China)

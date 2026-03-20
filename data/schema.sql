@@ -44,6 +44,7 @@ CREATE TABLE players (
     alias TEXT NOT NULL,
     real_name TEXT,
     country_code TEXT,
+    avatar_url TEXT,
     price INTEGER NOT NULL,
     pricing_score REAL NOT NULL DEFAULT 0,
     is_active INTEGER NOT NULL DEFAULT 1,

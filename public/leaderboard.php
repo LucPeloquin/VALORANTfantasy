@@ -5,12 +5,20 @@ define('APP_ROOT', dirname(__DIR__));
 require_once APP_ROOT . '/src/bootstrap.php';
 
 $user = requireAuth();
-$leagueId = (int)($_GET['league_id'] ?? 0);
-$league = getLeague($leagueId);
+$event = getCurrentEvent();
+if (!$event) {
+    http_response_code(500);
+    exit('No active event.');
+}
 
+$leagueId = (int)($_GET['league_id'] ?? 0);
+$league = $leagueId > 0 ? getLeague($leagueId) : null;
 if (!$league || !isUserInLeague($leagueId, (int)$user['id'])) {
-    http_response_code(404);
-    exit('League not found.');
+    $league = ensureUserInPrimaryLeague((int)$user['id'], (int)$event['id']);
+    $leagueId = (int)$league['id'];
+    if ((int)($_GET['league_id'] ?? 0) !== $leagueId) {
+        redirect('/leaderboard.php?league_id=' . $leagueId);
+    }
 }
 
 $rows = getLeagueLeaderboard($leagueId);

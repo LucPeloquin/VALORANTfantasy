@@ -8,16 +8,19 @@ Multi-page fantasy site for **VALORANT / VCT Americas Stage 1** with HLTV-inspir
   - `/index.php` hero/frontpage
   - `/register.php` account creation
   - `/login.php` username/password sign-in
-  - `/dashboard.php` league create/join + user hub
+  - `/dashboard.php` single-league hub
   - `/team-builder.php` roster builder + submit
   - `/players.php` player values/stats
   - `/player.php?id=...` per-player stats + fantasy projections
   - `/leaderboard.php` standings
   - `/team.php` public/private team profile
   - `/rules.php` scoring + pricing rubric
+  - `/credits.php` project/data credits page
+  - `/logout-page.php` logout confirmation page
   - `/admin.php` manual data sync
 - Authentication: username/password (session-based)
-- League invite codes, public/private leagues
+- Logged-in top-bar hamburger menu with shortcuts (Dashboard, Admin, Credits, Logout)
+- Single shared league per event (create/join flow is shelved for now)
 - 5-player roster rules:
   - Budget cap
   - Max 2 players per real team
@@ -27,11 +30,14 @@ Multi-page fantasy site for **VALORANT / VCT Americas Stage 1** with HLTV-inspir
 - Discord-friendly embeds:
   - `/share.php?slug=...` OG metadata endpoint
   - `/share-image.php?slug=...` generated lineup card image
-- VLR scraping pipeline for VCT Americas Stage 1 teams/rosters and baseline stats
+- VLR scraping pipeline for VCT Americas Stage 1 stats
+- Player avatars are cached locally under `public/assets/player-images/` during sync
 
 ## Data source behavior
 
 - Primary and only built-in source: **VLR.gg**
+- Source sync is **stats-only** (ratings/ACS/KD/KAST/KPR/APR/FKPR/FDPR/CL%).
+- Team info, roster structure, aliases, avatars, and prices remain manual/admin-controlled.
 - Stage 1 stats are used when available.
 - If Stage 1 stats are not populated yet, fallback uses VCT 2026 Americas Kickoff stats.
 - Automatic scheduled sync support:
@@ -46,6 +52,9 @@ Multi-page fantasy site for **VALORANT / VCT Americas Stage 1** with HLTV-inspir
 APP_BASE_URL=http://127.0.0.1:8080
 AUTO_SYNC_ON_BOOT=1
 AUTO_SYNC_INTERVAL_MINUTES=30
+# Optional: serve avatars from your own indexed image host (e.g. CDN)
+# PLAYER_IMAGE_INDEX_BASE_URL=https://your-domain.com/player-images
+# PLAYER_IMAGE_INDEX_EXTENSION=.png
 ```
 
 2. Run server:
@@ -70,6 +79,7 @@ Admin page:
 
 - `/admin.php`
 - Trigger manual VLR sync
+- Edit player values/stats/avatars directly in UI
 - View sync logs
 
 ## Scripts

@@ -6,9 +6,9 @@ require_once APP_ROOT . '/src/bootstrap.php';
 
 $user = currentUser();
 $event = getCurrentEvent();
-$publicLeagues = $event ? listPublicLeaguesForEvent((int)$event['id']) : [];
+$primaryLeague = $event ? getPrimaryLeagueForEvent((int)$event['id']) : null;
 
-renderLayout('VCT Fantasy - Home', static function () use ($user, $event, $publicLeagues): void {
+renderLayout('VCT Fantasy - Home', static function () use ($user, $event, $primaryLeague): void {
     ?>
     <section class="hero card">
         <h1>VCT Americas Fantasy League</h1>
@@ -34,24 +34,18 @@ renderLayout('VCT Fantasy - Home', static function () use ($user, $event, $publi
     <?php endif; ?>
 
     <section class="card">
-        <h2>Public Leagues</h2>
-        <?php if (!$publicLeagues): ?>
-            <p>No public leagues yet.</p>
+        <h2>Main League</h2>
+        <?php if (!$primaryLeague): ?>
+            <p>The main league will be created automatically on first signed-in visit.</p>
         <?php else: ?>
-            <table>
-                <thead>
-                    <tr><th>League</th><th>Description</th><th>Join Code</th></tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($publicLeagues as $league): ?>
-                        <tr>
-                            <td><?= h($league['name']) ?></td>
-                            <td><?= h((string)$league['description']) ?></td>
-                            <td><code><?= h($league['join_code']) ?></code></td>
-                        </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+            <p><strong><?= h($primaryLeague['name']) ?></strong></p>
+            <?php if (!empty($primaryLeague['description'])): ?>
+                <p><?= h((string)$primaryLeague['description']) ?></p>
+            <?php endif; ?>
+            <p>Join code: <code><?= h((string)$primaryLeague['join_code']) ?></code></p>
+            <?php if ($user): ?>
+                <p><a href="/dashboard.php">Go to dashboard</a></p>
+            <?php endif; ?>
         <?php endif; ?>
     </section>
     <?php

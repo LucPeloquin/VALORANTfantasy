@@ -17,57 +17,56 @@ function syncEventDataFromSources(int $eventId): array
         throw new RuntimeException('Event source ID is missing');
     }
 
-    $snapshot = scrapeVctAmericasSnapshot($sourceEventId, 2682);
-    $teams = $snapshot['teams'];
-    $players = $snapshot['players'];
-
-    if (!$teams || !$players) {
-        throw new RuntimeException('No data returned from scraper');
+    $statsSnapshot = scrapeVctAmericasStatsSnapshot($sourceEventId, 2682);
+    if (!$statsSnapshot['stage'] && !$statsSnapshot['fallback']) {
+        throw new RuntimeException('No stats data returned from scraper');
     }
 
-    $scores = [];
-    foreach ($players as $idx => $player) {
-        $scores[$idx] = computePricingScore($player['stats']);
+    $playersStmt = $pdo->prepare(
+        'SELECT id, source_player_id, alias FROM players WHERE event_id = :event_id AND is_active = 1 ORDER BY id ASC'
+    );
+    $playersStmt->execute([':event_id' => $eventId]);
+    $players = $playersStmt->fetchAll();
+    if (!$players) {
+        throw new RuntimeException('No active players found. Add or sync players first, then run stats sync.');
     }
 
-    arsort($scores);
-    $rank = 0;
-    foreach (array_keys($scores) as $idx) {
-        $players[$idx]['pricing_score'] = round($scores[$idx], 2);
-        $players[$idx]['price'] = computePriceFromRank($rank, count($players), (float)$scores[$idx]);
-        $rank++;
-    }
+    $teamsCountStmt = $pdo->prepare('SELECT COUNT(*) FROM pro_teams WHERE event_id = :event_id');
+    $teamsCountStmt->execute([':event_id' => $eventId]);
+    $teamsCount = (int)$teamsCountStmt->fetchColumn();
 
     $now = nowUtc();
+    $updated = 0;
+    $defaults = 0;
 
     $pdo->beginTransaction();
     try {
-        $knownTeamIds = [];
-        foreach ($teams as $team) {
-            $teamId = upsertEventTeam($pdo, $eventId, $team, $now);
-            $knownTeamIds[(int)$team['source_team_id']] = $teamId;
-        }
-
-        $activeSourcePlayerIds = [];
         foreach ($players as $player) {
-            $teamId = $knownTeamIds[(int)$player['source_team_id']] ?? null;
-            if (!$teamId) {
-                continue;
+            $playerId = (int)$player['id'];
+            $sourcePlayerId = (int)($player['source_player_id'] ?? 0);
+            $alias = strtolower(trim((string)($player['alias'] ?? '')));
+
+            $stage = $sourcePlayerId > 0 ? ($statsSnapshot['stage']['by_id'][$sourcePlayerId] ?? null) : null;
+            $fallbackById = $sourcePlayerId > 0 ? ($statsSnapshot['fallback']['by_id'][$sourcePlayerId] ?? null) : null;
+            $fallbackByAlias = $alias !== '' ? ($statsSnapshot['fallback']['by_alias'][$alias] ?? null) : null;
+            $fallback = $fallbackById ?: $fallbackByAlias;
+
+            $stats = $stage ?: $fallback ?: defaultPlayerStats();
+            $sourcePrimary = $stage ? 'vlr_stage1' : ($fallback ? 'vlr_kickoff' : 'default');
+            upsertEventPlayerStats($pdo, $eventId, $playerId, $stats, $sourcePrimary, null, $now);
+
+            $updated++;
+            if (!$stage && !$fallback) {
+                $defaults++;
             }
-
-            $playerId = upsertEventPlayer($pdo, $eventId, $teamId, $player, $now);
-            upsertEventPlayerStats($pdo, $eventId, $playerId, $player['stats'], $player['source_primary'], $player['source_secondary'], $now);
-            $activeSourcePlayerIds[] = (int)$player['source_player_id'];
         }
-
-        markInactivePlayers($pdo, $eventId, $activeSourcePlayerIds);
 
         $pdo->prepare('INSERT INTO sync_logs (event_id, source, status, message, created_at) VALUES (:event_id, :source, :status, :message, :created_at)')
             ->execute([
                 ':event_id' => $eventId,
                 ':source' => 'vlr',
                 ':status' => 'ok',
-                ':message' => 'Teams: ' . count($teams) . ', Players: ' . count($players),
+                ':message' => 'Stats-only sync. Teams: ' . $teamsCount . ', Players updated: ' . $updated . ', Defaults used: ' . $defaults,
                 ':created_at' => $now,
             ]);
 
@@ -92,14 +91,41 @@ function syncEventDataFromSources(int $eventId): array
     file_put_contents(APP_ROOT . '/data/vct_americas_stage1_snapshot.json', json_encode([
         'generated_at' => $now,
         'event_id' => $sourceEventId,
-        'teams_count' => count($teams),
-        'players_count' => count($players),
-        'players' => $players,
+        'sync_mode' => 'stats_only',
+        'teams_count' => $teamsCount,
+        'players_updated' => $updated,
+        'defaults_used' => $defaults,
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
 
     return [
-        'teams' => count($teams),
-        'players' => count($players),
+        'teams' => $teamsCount,
+        'players' => $updated,
+    ];
+}
+
+function scrapeVctAmericasStatsSnapshot(int $stageEventId, int $fallbackEventId): array
+{
+    return [
+        'stage' => scrapeVlrEventStats($stageEventId),
+        'fallback' => scrapeVlrEventStats($fallbackEventId),
+    ];
+}
+
+function defaultPlayerStats(): array
+{
+    return [
+        'rounds_played' => 0,
+        'rating' => 1.00,
+        'acs' => 200.0,
+        'kd' => 1.00,
+        'kast' => 70.0,
+        'adr' => 130.0,
+        'kpr' => 0.70,
+        'apr' => 0.20,
+        'fkpr' => 0.10,
+        'fdpr' => 0.12,
+        'hs_pct' => 23.0,
+        'cl_pct' => 20.0,
     ];
 }
 
@@ -144,6 +170,7 @@ function scrapeVctAmericasSnapshot(int $stageEventId, int $fallbackEventId): arr
                 'alias' => $p['alias'],
                 'real_name' => $p['real_name'],
                 'country_code' => $p['country_code'],
+                'avatar_url' => resolvePlayerAvatarUrl($sourcePlayerId, $p['avatar_url'] ?? null),
                 'price' => 180000,
                 'pricing_score' => 0.0,
                 'stats' => $stats,
@@ -228,6 +255,7 @@ function scrapeVlrTeamPage(int $teamId, string $slug): array
             $aliasNode = $xpath->query('.//div[contains(@class,"team-roster-item-name-alias")]', $a)?->item(0);
             $realNode = $xpath->query('.//div[contains(@class,"team-roster-item-name-real")]', $a)?->item(0);
             $flagNode = $xpath->query('.//i[contains(@class,"flag")]', $a)?->item(0);
+            $avatarNode = $xpath->query('.//div[contains(@class,"team-roster-item-img")]//img', $a)?->item(0);
 
             $alias = trim(preg_replace('/\s+/', ' ', (string)($aliasNode?->textContent ?? $m[2])));
             $alias = trim((string)preg_replace('/\x{2605}/u', '', $alias));
@@ -241,11 +269,17 @@ function scrapeVlrTeamPage(int $teamId, string $slug): array
                 }
             }
 
+            $avatarUrl = null;
+            if ($avatarNode) {
+                $avatarUrl = normalizeHttpUrl((string)$avatarNode->getAttribute('src'));
+            }
+
             $players[] = [
                 'source_player_id' => (int)$m[1],
                 'alias' => $alias !== '' ? $alias : $m[2],
                 'real_name' => trim((string)($realNode?->textContent ?? '')),
                 'country_code' => $countryCode,
+                'avatar_url' => $avatarUrl,
             ];
         }
     }
@@ -355,6 +389,7 @@ function upsertEventPlayer(PDO $pdo, int $eventId, int $teamId, array $player, s
         $pdo->prepare(
             'UPDATE players
              SET team_id = :team_id, alias = :alias, real_name = :real_name, country_code = :country_code,
+                 avatar_url = COALESCE(:avatar_url, avatar_url),
                  price = :price, pricing_score = :pricing_score, is_active = 1
              WHERE id = :id'
         )->execute([
@@ -362,6 +397,7 @@ function upsertEventPlayer(PDO $pdo, int $eventId, int $teamId, array $player, s
             ':alias' => $player['alias'],
             ':real_name' => $player['real_name'],
             ':country_code' => $player['country_code'],
+            ':avatar_url' => $player['avatar_url'] ?? null,
             ':price' => (int)$player['price'],
             ':pricing_score' => (float)$player['pricing_score'],
             ':id' => (int)$existingId,
@@ -370,8 +406,8 @@ function upsertEventPlayer(PDO $pdo, int $eventId, int $teamId, array $player, s
     }
 
     $insert = $pdo->prepare(
-        'INSERT INTO players (event_id, team_id, source_player_id, alias, real_name, country_code, price, pricing_score, is_active, created_at)
-         VALUES (:event_id, :team_id, :source_player_id, :alias, :real_name, :country_code, :price, :pricing_score, 1, :created_at)'
+        'INSERT INTO players (event_id, team_id, source_player_id, alias, real_name, country_code, avatar_url, price, pricing_score, is_active, created_at)
+         VALUES (:event_id, :team_id, :source_player_id, :alias, :real_name, :country_code, :avatar_url, :price, :pricing_score, 1, :created_at)'
     );
     $insert->execute([
         ':event_id' => $eventId,
@@ -380,6 +416,7 @@ function upsertEventPlayer(PDO $pdo, int $eventId, int $teamId, array $player, s
         ':alias' => $player['alias'],
         ':real_name' => $player['real_name'],
         ':country_code' => $player['country_code'],
+        ':avatar_url' => $player['avatar_url'] ?? null,
         ':price' => (int)$player['price'],
         ':pricing_score' => (float)$player['pricing_score'],
         ':created_at' => $now,
@@ -453,6 +490,98 @@ function markInactivePlayers(PDO $pdo, int $eventId, array $activeSourcePlayerId
     $stmt->execute(array_merge([$eventId], $activeSourcePlayerIds));
 }
 
+function resolvePlayerAvatarUrl(int $sourcePlayerId, ?string $sourceUrl): ?string
+{
+    $indexBase = trim((string)env('PLAYER_IMAGE_INDEX_BASE_URL', ''));
+    if ($indexBase !== '') {
+        $ext = trim((string)env('PLAYER_IMAGE_INDEX_EXTENSION', '.png'));
+        if ($ext === '') {
+            $ext = '.png';
+        }
+        if ($ext[0] !== '.') {
+            $ext = '.' . $ext;
+        }
+        return rtrim($indexBase, '/') . '/' . $sourcePlayerId . $ext;
+    }
+
+    return cachePlayerAvatarLocally($sourcePlayerId, $sourceUrl);
+}
+
+function cachePlayerAvatarLocally(int $sourcePlayerId, ?string $sourceUrl): ?string
+{
+    $sourceUrl = normalizeHttpUrl($sourceUrl);
+    if ($sourceUrl === null) {
+        return null;
+    }
+
+    $cacheDir = APP_ROOT . '/public/assets/player-images';
+    if (!is_dir($cacheDir)) {
+        mkdir($cacheDir, 0775, true);
+    }
+
+    $ext = avatarExtensionFromUrl($sourceUrl);
+    $filename = $sourcePlayerId . '.' . $ext;
+    $absolutePath = $cacheDir . '/' . $filename;
+    $publicPath = '/assets/player-images/' . $filename;
+
+    if (is_file($absolutePath) && (int)filesize($absolutePath) > 0) {
+        return $publicPath;
+    }
+
+    if (downloadAvatarImage($sourceUrl, $absolutePath)) {
+        return $publicPath;
+    }
+
+    return $sourceUrl;
+}
+
+function avatarExtensionFromUrl(string $url): string
+{
+    $path = (string)parse_url($url, PHP_URL_PATH);
+    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    $allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'];
+    if (in_array($ext, $allowed, true)) {
+        return $ext;
+    }
+    return 'png';
+}
+
+function downloadAvatarImage(string $url, string $targetPath): bool
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        CURLOPT_HTTPHEADER => [
+            'Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            'Referer: https://www.vlr.gg/',
+            'Cache-Control: no-cache',
+            'Pragma: no-cache',
+        ],
+    ]);
+
+    $body = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $contentType = strtolower((string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE));
+
+    if ($body === false || $status >= 400) {
+        return false;
+    }
+
+    if ($contentType !== '' && !str_starts_with($contentType, 'image/')) {
+        return false;
+    }
+
+    if ($body === '') {
+        return false;
+    }
+
+    return file_put_contents($targetPath, $body) !== false;
+}
+
 function httpGet(string $url): string
 {
     $ch = curl_init($url);
@@ -509,4 +638,30 @@ function toIntCell(?string $text): int
     }
     $v = preg_replace('/[^0-9]/', '', $text);
     return $v === '' ? 0 : (int)$v;
+}
+
+function normalizeHttpUrl(?string $url): ?string
+{
+    if ($url === null) {
+        return null;
+    }
+
+    $url = trim($url);
+    if ($url === '') {
+        return null;
+    }
+
+    if (str_starts_with($url, '//')) {
+        return 'https:' . $url;
+    }
+
+    if (str_starts_with($url, '/')) {
+        return 'https://www.vlr.gg' . $url;
+    }
+
+    if (!preg_match('#^https?://#i', $url)) {
+        return null;
+    }
+
+    return $url;
 }
